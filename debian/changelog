@@ -1,4 +1,4 @@
-singularity (2.1~testing0+git39-g875d469-1) unstable; urgency=medium
+singularity-container (2.1~testing0+git39-g875d469-1) unstable; urgency=medium
 
   * Fresh pre-release snapshot
   * Upload to Debian proper (Closes: #828970)
@@ -9,14 +9,14 @@ singularity (2.1~testing0+git39-g875d469-1) unstable; urgency=medium
 
  -- Yaroslav Halchenko <debian@onerussian.com>  Thu, 14 Jul 2016 11:03:15 -0400
 
-singularity (2.0-1) UNRELEASED; urgency=medium
+singularity-container (2.0-1) UNRELEASED; urgency=medium
 
   * New upstream release
   * Initial Debian packaging
 
  -- Dave Love <fx@gnu.org>  Thu, 02 Jun 2016 22:48:28 +0100
 
-singularity (1.0-1) UNRELEASED; urgency=low
+singularity-container (1.0-1) UNRELEASED; urgency=low
 
   * Initial release
 

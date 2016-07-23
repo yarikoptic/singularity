@@ -1,4 +1,4 @@
-Source: singularity
+Source: singularity-container
 Section: admin
 Priority: optional
 Maintainer: NeuroDebian Team <team@neuro.debian.net>
