@@ -1,3 +1,9 @@
+singularity-container (2.1.2-1) unstable; urgency=medium
+
+  * Fresh upstream release
+
+ -- Yaroslav Halchenko <debian@onerussian.com>  Sat, 06 Aug 2016 14:13:44 -0400
+
 singularity-container (2.1~testing0+git39-g875d469-1) unstable; urgency=medium
 
   * Fresh pre-release snapshot
