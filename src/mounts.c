@@ -61,11 +61,11 @@ int mount_image(char * loop_device, char * mount_point, int writable) {
 
     if ( writable > 0 ) {
         message(DEBUG, "Trying to mount read/write as ext4 with discard option\n");
-        if ( mount(loop_device, mount_point, "ext4", MS_NOSUID, "discard") < 0 ) {
+        if ( mount(loop_device, mount_point, "ext4", MS_NOSUID, "discard,errors=remount-ro") < 0 ) {
             message(DEBUG, "Trying to mount read/write as ext4 without discard option\n");
-            if ( mount(loop_device, mount_point, "ext4", MS_NOSUID, "") < 0 ) {
+            if ( mount(loop_device, mount_point, "ext4", MS_NOSUID, "errors=remount-ro") < 0 ) {
                 message(DEBUG, "Trying to mount read/write as ext3\n");
-                if ( mount(loop_device, mount_point, "ext3", MS_NOSUID, "") < 0 ) {
+                if ( mount(loop_device, mount_point, "ext3", MS_NOSUID, "errors=remount-ro") < 0 ) {
                     message(ERROR, "Failed to mount (rw) '%s' at '%s': %s\n", loop_device, mount_point, strerror(errno));
                     ABORT(255);
                 }
@@ -108,7 +108,7 @@ int mount_bind(char * source, char * dest, int writable) {
     }
 
     message(DEBUG, "Calling mount(%s, %s, ...)\n", source, dest);
-    if ( mount(source, dest, NULL, MS_BIND|MS_NOSUID|MS_REC, NULL) < 0 ) {
+    if ( mount(source, dest, NULL, MS_BIND|MS_REC, NULL) < 0 ) {
         message(ERROR, "Could not bind %s: %s\n", dest, strerror(errno));
         ABORT(255);
     }

@@ -28,9 +28,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/param.h>
-#ifdef SINGULARITY_NO_NEW_PRIVS
-#include <sys/prctl.h>
-#endif
 #include <errno.h> 
 #include <signal.h>
 #include <sched.h>
@@ -83,6 +80,7 @@ void sighandler(int sig) {
 
 
 int main(int argc, char ** argv) {
+    FILE *loop_fp = NULL;
     FILE *containerimage_fp;
     FILE *config_fp;
     FILE *daemon_fp = NULL;
@@ -92,8 +90,8 @@ int main(int argc, char ** argv) {
     char *command;
     char *sessiondir;
     char *sessiondir_prefix;
-    char *loop_dev_lock = NULL;
-    char *loop_dev_cache = NULL;
+    char *loop_dev_lock;
+    char *loop_dev_cache;
     char *homedir;
     char *homedir_base = 0;
     char *loop_dev = 0;
@@ -103,8 +101,6 @@ int main(int argc, char ** argv) {
     char cwd[PATH_MAX]; // Flawfinder: ignore
     int cwd_fd;
     int sessiondirlock_fd;
-    int containerimage_fd;
-    int loop_dev_fd;
     int loop_dev_lock_fd;
     int join_daemon_ns = 0;
     int retval = 0;
@@ -112,7 +108,7 @@ int main(int argc, char ** argv) {
     pid_t namespace_fork_pid = 0;
     struct passwd *pw;
     struct s_privinfo uinfo;
-    int use_chroot = 0;
+
 
 
 //****************************************************************************//
@@ -177,17 +173,8 @@ int main(int argc, char ** argv) {
 
     message(DEBUG, "Checking container image is a file: %s\n", containerimage);
     if ( is_file(containerimage) != 0 ) {
-#ifdef SINGULARITY_NO_NEW_PRIVS
-	 if ( is_dir(containerimage) == 0 )
-#else
-        if (0)
-#endif
-        {
-            use_chroot = 1;
-        } else {
-            message(ERROR, "Container image path is invalid: %s\n", containerimage);
-            ABORT(1);
-        }
+        message(ERROR, "Container image path is invalid: %s\n", containerimage);
+        ABORT(1);
     }
 
     message(DEBUG, "Building configuration file location\n");
@@ -233,11 +220,9 @@ int main(int argc, char ** argv) {
     containername = basename(strdup(containerimage));
     message(DEBUG, "Set containername to: %s\n", containername);
 
-    if (!use_chroot) {
-        message(DEBUG, "Setting loop_dev_* paths\n");
-        loop_dev_lock = joinpath(sessiondir, "loop_dev.lock");
-        loop_dev_cache = joinpath(sessiondir, "loop_dev");
-    }
+    message(DEBUG, "Setting loop_dev_* paths\n");
+    loop_dev_lock = joinpath(sessiondir, "loop_dev.lock");
+    loop_dev_cache = joinpath(sessiondir, "loop_dev");
 
     rewind(config_fp);
     if ( ( containerdir = config_get_key_value(config_fp, "container dir") ) == NULL ) {
@@ -249,32 +234,34 @@ int main(int argc, char ** argv) {
     message(LOG, "Command=%s, Container=%s, CWD=%s, Arg1=%s\n", command, containerimage, cwd, argv[1]);
 
     message(DEBUG, "Checking if we are opening image as read/write\n");
-    if ( getenv("SINGULARITY_WRITABLE") == NULL ) { // Flawfinder: ignore (only checking for existance of getenv)
+    if ( getenv("SINGULARITY_WRITABLE") != NULL ) { // Flawfinder: ignore (only checking for existance of getenv)
+    	int containerimage_fd;
+
+        if ( getuid() == 0 ) {
+            message(DEBUG, "Opening image as read/write: %s\n", containerimage);
+            if ( ( containerimage_fp = fopen(containerimage, "r+") ) == NULL ) { // Flawfinder: ignore
+                message(ERROR, "Could not open image read/write %s: %s\n", containerimage, strerror(errno));
+                ABORT(255);
+            }
+
+            containerimage_fd = fileno(containerimage_fp);
+            message(DEBUG, "Setting exclusive lock on file descriptor: %d\n", containerimage_fd);
+            if ( flock(containerimage_fd, LOCK_EX | LOCK_NB) < 0 ) {
+                message(WARNING, "Could not obtain exclusive lock on image\n");
+            }
+        } else {
+            message(ERROR, "Only root can mount images as writable\n");
+            ABORT(1);
+        }
+
+    } else {
+
         message(DEBUG, "Opening image as read only: %s\n", containerimage);
         if ( ( containerimage_fp = fopen(containerimage, "r") ) == NULL ) { // Flawfinder: ignore 
             message(ERROR, "Could not open image read only %s: %s\n", containerimage, strerror(errno));
             ABORT(255);
         }
 
-        containerimage_fd = fileno(containerimage_fp);
-        message(DEBUG, "Setting shared lock on file descriptor: %d\n", containerimage_fd);
-        if ( flock(containerimage_fd, LOCK_SH | LOCK_NB) < 0 ) {
-            message(ERROR, "Could not obtained shared lock on image\n");
-            ABORT(5);
-        }
-    } else {
-        message(DEBUG, "Opening image as read/write: %s\n", containerimage);
-        if ( ( containerimage_fp = fopen(containerimage, "r+") ) == NULL ) { // Flawfinder: ignore
-            message(ERROR, "Could not open image read/write %s: %s\n", containerimage, strerror(errno));
-            ABORT(255);
-        }
-
-        containerimage_fd = fileno(containerimage_fp);
-        message(DEBUG, "Setting exclusive lock on file descriptor: %d\n", containerimage_fd);
-        if ( flock(containerimage_fd, LOCK_EX | LOCK_NB) < 0 ) {
-            message(ERROR, "Could not obtained exclusive lock on image\n");
-            ABORT(5);
-        }
     }
 
     message(DEBUG, "Checking for namespace daemon pidfile\n");
@@ -347,49 +334,46 @@ int main(int argc, char ** argv) {
         ABORT(255);
     }
 
-    if (!use_chroot) {
-        message(DEBUG, "Checking for set loop device\n");
-        if ( ( loop_dev_lock_fd = open(loop_dev_lock, O_CREAT | O_RDWR, 0644) ) < 0 ) { // Flawfinder: ignore
-            message(ERROR, "Could not open loop_dev_lock %s: %s\n", loop_dev_lock, strerror(errno));
+    message(DEBUG, "Checking for set loop device\n");
+    if ( ( loop_dev_lock_fd = open(loop_dev_lock, O_CREAT | O_RDWR, 0644) ) < 0 ) { // Flawfinder: ignore
+        message(ERROR, "Could not open loop_dev_lock %s: %s\n", loop_dev_lock, strerror(errno));
+        ABORT(255);
+    }
+
+    message(DEBUG, "Requesting exclusive flock() on loop_dev lockfile\n");
+    if ( flock(loop_dev_lock_fd, LOCK_EX | LOCK_NB) == 0 ) {
+        message(DEBUG, "We have exclusive flock() on loop_dev lockfile\n");
+
+        message(DEBUG, "Binding container to loop interface\n");
+        if ( ( loop_fp = loop_bind(containerimage_fp, &loop_dev, 1)) == NULL ) {
+            message(ERROR, "Could not bind image to loop!\n");
             ABORT(255);
         }
 
-        message(DEBUG, "Requesting exclusive flock() on loop_dev lockfile\n");
-        if ( flock(loop_dev_lock_fd, LOCK_EX | LOCK_NB) == 0 ) {
-            message(DEBUG, "We have exclusive flock() on loop_dev lockfile\n");
-
-            message(DEBUG, "Binding container to loop interface\n");
-            if ( loop_bind(containerimage_fp, &loop_dev, 1) < 0 ) {
-                message(ERROR, "Could not bind image to loop!\n");
-                ABORT(255);
-            }
-
-            message(DEBUG, "Writing loop device name to loop_dev: %s\n", loop_dev);
-            if ( fileput(loop_dev_cache, loop_dev) < 0 ) {
-                message(ERROR, "Could not write to loop_dev_cache %s: %s\n", loop_dev_cache, strerror(errno));
-                ABORT(255);
-            }
-
-            message(DEBUG, "Resetting exclusive flock() to shared on loop_dev lockfile\n");
-            flock(loop_dev_lock_fd, LOCK_SH | LOCK_NB);
-
-        } else {
-            message(DEBUG, "Unable to get exclusive flock() on loop_dev lockfile\n");
-
-            message(DEBUG, "Waiting to obtain shared lock on loop_dev lockfile\n");
-            flock(loop_dev_lock_fd, LOCK_SH);
-
-            message(DEBUG, "Exclusive lock on loop_dev lockfile released, getting loop_dev\n");
-            if ( ( loop_dev = filecat(loop_dev_cache) ) == NULL ) {
-                message(ERROR, "Could not retrieve loop_dev_cache from %s\n", loop_dev_cache);
-                ABORT(255);
-            }
-
+        message(DEBUG, "Writing loop device name to loop_dev: %s\n", loop_dev);
+        if ( fileput(loop_dev_cache, loop_dev) < 0 ) {
+            message(ERROR, "Could not write to loop_dev_cache %s: %s\n", loop_dev_cache, strerror(errno));
+            ABORT(255);
         }
 
-        message(VERBOSE3, "Opening loop device so it stays attached\n");
-        if ( ( loop_dev_fd = open(loop_dev, O_RDONLY) ) < 0 ) { // Flawfinder: ignore
-            message(ERROR, "Could not open loop device %s: %s\n", loop_dev, strerror(errno));
+        message(DEBUG, "Resetting exclusive flock() to shared on loop_dev lockfile\n");
+        flock(loop_dev_lock_fd, LOCK_SH | LOCK_NB);
+
+    } else {
+        message(DEBUG, "Unable to get exclusive flock() on loop_dev lockfile\n");
+
+        message(DEBUG, "Waiting to obtain shared lock on loop_dev lockfile\n");
+        flock(loop_dev_lock_fd, LOCK_SH);
+
+        message(DEBUG, "Exclusive lock on loop_dev lockfile released, getting loop_dev\n");
+        if ( ( loop_dev = filecat(loop_dev_cache) ) == NULL ) {
+            message(ERROR, "Could not retrieve loop_dev_cache from %s\n", loop_dev_cache);
+            ABORT(255);
+        }
+
+        message(DEBUG, "Attaching loop file pointer to loop_dev\n");
+        if ( ( loop_fp = loop_attach(loop_dev) ) == NULL ) {
+            message(ERROR, "Could not obtain file pointer to loop device!\n");
             ABORT(255);
         }
     }
@@ -515,33 +499,25 @@ int main(int argc, char ** argv) {
                 ABORT(255);
             }
 
-            int slave = config_get_key_bool(config_fp, "mount slave", 0);
             // Privatize the mount namespaces
-            message(DEBUG, "Making mounts %s\n", (slave ? "slave" : "private"));
-            if ( mount(NULL, "/", NULL, (slave ? MS_SLAVE : MS_PRIVATE)|MS_REC, NULL) < 0 ) {
-                message(ERROR, "Could not make mountspaces %s: %s\n", (slave ? "slave" : "private"), strerror(errno));
+            message(DEBUG, "Making mounts private\n");
+            if ( mount(NULL, "/", NULL, MS_PRIVATE|MS_REC, NULL) < 0 ) {
+                message(ERROR, "Could not make mountspaces private: %s\n", strerror(errno));
                 ABORT(255);
             }
 
 
-            if (use_chroot) {
-                message(DEBUG, "Mounting Singularity chroot read only\n");
-                if ( mount_bind(containerimage, containerdir, 0) < 0 ) {
+            // Mount image
+            if ( getenv("SINGULARITY_WRITABLE") == NULL ) { // Flawfinder: ignore (only checking for existance of envar)
+                message(DEBUG, "Mounting Singularity image file read only\n");
+                if ( mount_image(loop_dev, containerdir, 0) < 0 ) {
                     ABORT(255);
                 }
             } else {
-                // Mount image
-                if ( getenv("SINGULARITY_WRITABLE") == NULL ) { // Flawfinder: ignore (only checking for existance of envar)
-                    message(DEBUG, "Mounting Singularity image file read only\n");
-                    if ( mount_image(loop_dev, containerdir, 0) < 0 ) {
-                        ABORT(255);
-                    }
-                } else {
-                    unsetenv("SINGULARITY_WRITABLE");
-                    message(DEBUG, "Mounting Singularity image file read/write\n");
-                    if ( mount_image(loop_dev, containerdir, 1) < 0 ) {
-                        ABORT(255);
-                    }
+                unsetenv("SINGULARITY_WRITABLE");
+                message(DEBUG, "Mounting Singularity image file read/write\n");
+                if ( mount_image(loop_dev, containerdir, 1) < 0 ) {
+                    ABORT(255);
                 }
             }
 
@@ -617,53 +593,53 @@ int main(int argc, char ** argv) {
                         ABORT(255);
                     }
                 }
+            }
 
 
-                if ( uid != 0 ) { // If we are root, no need to mess with passwd or group
-                    message(DEBUG, "Checking configuration file for 'config passwd'\n");
-                    rewind(config_fp);
-                    if ( config_get_key_bool(config_fp, "config passwd", 1) > 0 ) {
-                        if (is_file(joinpath(containerdir, "/etc/passwd")) == 0 ) {
-                            if ( is_file(joinpath(sessiondir, "/passwd")) < 0 ) {
-                                message(VERBOSE2, "Staging /etc/passwd with user info\n");
-                                if ( build_passwd(joinpath(containerdir, "/etc/passwd"), joinpath(sessiondir, "/passwd")) < 0 ) {
-                                    message(ERROR, "Failed creating template password file\n");
-                                    ABORT(255);
-                                }
-                            }
-                            message(VERBOSE, "Binding staged /etc/passwd into container\n");
-                            if ( mount_bind(joinpath(sessiondir, "/passwd"), joinpath(containerdir, "/etc/passwd"), 1) < 0 ) {
-                                message(ERROR, "Could not bind /etc/passwd\n");
+            if ( uid != 0 ) { // If we are root, no need to mess with passwd or group
+                message(DEBUG, "Checking configuration file for 'config passwd'\n");
+                rewind(config_fp);
+                if ( config_get_key_bool(config_fp, "config passwd", 1) > 0 ) {
+                    if (is_file(joinpath(containerdir, "/etc/passwd")) == 0 ) {
+                        if ( is_file(joinpath(sessiondir, "/passwd")) < 0 ) {
+                            message(VERBOSE2, "Staging /etc/passwd with user info\n");
+                            if ( build_passwd(joinpath(containerdir, "/etc/passwd"), joinpath(sessiondir, "/passwd")) < 0 ) {
+                                message(ERROR, "Failed creating template password file\n");
                                 ABORT(255);
                             }
                         }
-                    } else {
-                        message(VERBOSE, "Skipping /etc/passwd staging\n");
-                    }
-
-                    message(DEBUG, "Checking configuration file for 'config group'\n");
-                    rewind(config_fp);
-                    if ( config_get_key_bool(config_fp, "config group", 1) > 0 ) {
-                        if (is_file(joinpath(containerdir, "/etc/group")) == 0 ) {
-                            if ( is_file(joinpath(sessiondir, "/group")) < 0 ) {
-                                message(VERBOSE2, "Staging /etc/group with user info\n");
-                                if ( build_group(joinpath(containerdir, "/etc/group"), joinpath(sessiondir, "/group")) < 0 ) {
-                                    message(ERROR, "Failed creating template group file\n");
-                                    ABORT(255);
-                                }
-                            }
-                            message(VERBOSE, "Binding staged /etc/group into container\n");
-                            if ( mount_bind(joinpath(sessiondir, "/group"), joinpath(containerdir, "/etc/group"), 1) < 0 ) {
-                                message(ERROR, "Could not bind /etc/group\n");
-                                ABORT(255);
-                            }
+                        message(VERBOSE, "Binding staged /etc/passwd into container\n");
+                        if ( mount_bind(joinpath(sessiondir, "/passwd"), joinpath(containerdir, "/etc/passwd"), 1) < 0 ) {
+                            message(ERROR, "Could not bind /etc/passwd\n");
+                            ABORT(255);
                         }
-                    } else {
-                        message(VERBOSE, "Skipping /etc/group staging\n");
                     }
                 } else {
-                    message(VERBOSE, "Not staging passwd or group (running as root)\n");
+                    message(VERBOSE, "Skipping /etc/passwd staging\n");
                 }
+
+                message(DEBUG, "Checking configuration file for 'config group'\n");
+                rewind(config_fp);
+                if ( config_get_key_bool(config_fp, "config group", 1) > 0 ) {
+                    if (is_file(joinpath(containerdir, "/etc/group")) == 0 ) {
+                        if ( is_file(joinpath(sessiondir, "/group")) < 0 ) {
+                            message(VERBOSE2, "Staging /etc/group with user info\n");
+                            if ( build_group(joinpath(containerdir, "/etc/group"), joinpath(sessiondir, "/group")) < 0 ) {
+                                message(ERROR, "Failed creating template group file\n");
+                                ABORT(255);
+                            }
+                        }
+                        message(VERBOSE, "Binding staged /etc/group into container\n");
+                        if ( mount_bind(joinpath(sessiondir, "/group"), joinpath(containerdir, "/etc/group"), 1) < 0 ) {
+                            message(ERROR, "Could not bind /etc/group\n");
+                            ABORT(255);
+                        }
+                    }
+                } else {
+                    message(VERBOSE, "Skipping /etc/group staging\n");
+                }
+            } else {
+                message(VERBOSE, "Not staging passwd or group (running as root)\n");
             }
 
             // Fork off exec process
@@ -727,18 +703,22 @@ int main(int argc, char ** argv) {
                 }
 
 
-                // Change to the proper directory
-                message(VERBOSE2, "Changing to correct working directory: %s\n", cwd);
-                if ( is_dir(cwd) == 0 ) {
-                   if ( chdir(cwd) < 0 ) {
-                        message(ERROR, "Could not chdir to: %s: %s\n", cwd, strerror(errno));
-                        ABORT(1);
+                if ( getenv("SINGULARITY_CONTAIN") == NULL ) { // Flawfinder: ignore (only checking for existance of envar)
+                    // Change to the proper directory
+                    message(VERBOSE2, "Changing to correct working directory: %s\n", cwd);
+                    if ( is_dir(cwd) == 0 ) {
+                       if ( chdir(cwd) < 0 ) {
+                            message(ERROR, "Could not chdir to: %s: %s\n", cwd, strerror(errno));
+                            ABORT(1);
+                        }
+                    } else {
+                        if ( fchdir(cwd_fd) < 0 ) {
+                            message(ERROR, "Could not fchdir to cwd: %s\n", strerror(errno));
+                            ABORT(1);
+                        }
                     }
                 } else {
-                    if ( fchdir(cwd_fd) < 0 ) {
-                        message(ERROR, "Could not fchdir to cwd: %s\n", strerror(errno));
-                        ABORT(1);
-                    }
+                    message(VERBOSE3, "Not chdir'ing to CWD, called with --contain\n");
                 }
 
                 // After this, we exist only within the container... Let's make it known!
@@ -748,16 +728,7 @@ int main(int argc, char ** argv) {
                     ABORT(1);
                 }
 
-#if defined(SINGULARITY_NO_NEW_PRIVS)
-                // Prevent this container from gaining any future privileges.
-                message(DEBUG, "Setting NO_NEW_PRIVS to prevent future privilege escalations.\n");
-                if ( prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ) {
-                    message(ERROR, "Could not set NO_NEW_PRIVS safeguard: %s\n", strerror(errno));
-                    ABORT(1);
-                }
-#else  // SINGULARITY_NO_NEW_PRIVS
-                message(VERBOSE2, "Not enabling NO_NEW_PRIVS flag due to lack of compile-time support.\n");
-#endif
+
                 // Do what we came here to do!
                 if ( command == NULL ) {
                     message(WARNING, "No command specified, launching 'shell'\n");
@@ -994,6 +965,13 @@ int main(int argc, char ** argv) {
     }
 
     message(DEBUG, "Checking to see if we are the last process running in this sessiondir\n");
+
+
+    message(DEBUG, "Closing the loop device file descriptor: %s\n", loop_fp);
+    fclose(loop_fp);
+    message(DEBUG, "Closing the container image file descriptor\n");
+    fclose(containerimage_fp);
+
     if ( flock(sessiondirlock_fd, LOCK_EX | LOCK_NB) == 0 ) {
         close(sessiondirlock_fd);
 
@@ -1007,6 +985,9 @@ int main(int argc, char ** argv) {
             message(WARNING, "Could not remove all files in %s: %s\n", sessiondir, strerror(errno));
         }
 
+        message(DEBUG, "Calling loop_free(%s)\n", loop_dev);
+        loop_free(loop_dev);
+
         if ( drop_privs(&uinfo) < 0 ) {
             ABORT(255);
         }
@@ -1017,7 +998,6 @@ int main(int argc, char ** argv) {
 
     message(VERBOSE2, "Cleaning up...\n");
 
-    close(containerimage_fd);
     close(sessiondirlock_fd);
 
     free(loop_dev_lock);
